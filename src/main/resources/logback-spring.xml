@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured JSON logs. Every line carries the request's traceId from the MDC,
+  so a caller who quotes the X-Trace-Id header from a failed response can be
+  matched to the exact log lines for that request across services.
+
+  A local profile keeps human-readable output, because JSON in a dev terminal is
+  a false economy.
+-->
+<configuration>
+  <springProfile name="!local">
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+      <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+        <includeMdcKeyName>traceId</includeMdcKeyName>
+        <includeMdcKeyName>method</includeMdcKeyName>
+        <includeMdcKeyName>path</includeMdcKeyName>
+        <includeMdcKeyName>idempotencyKey</includeMdcKeyName>
+        <customFields>{"service":"ledger-service"}</customFields>
+        <fieldNames>
+          <timestamp>ts</timestamp>
+          <message>msg</message>
+          <thread>thread</thread>
+          <logger>logger</logger>
+          <levelValue>[ignore]</levelValue>
+        </fieldNames>
+      </encoder>
+    </appender>
+    <root level="INFO">
+      <appender-ref ref="JSON"/>
+    </root>
+  </springProfile>
+
+  <springProfile name="local">
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+      <encoder>
+        <pattern>%d{HH:mm:ss.SSS} %-5level [%X{traceId:-no-trace}] %logger{36} - %msg%n</pattern>
+      </encoder>
+    </appender>
+    <root level="INFO">
+      <appender-ref ref="CONSOLE"/>
+    </root>
+  </springProfile>
+</configuration>

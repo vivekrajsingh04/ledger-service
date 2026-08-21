@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build + Testcontainers suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: compile
+        run: mvn -B -ntp compile
+
+      - name: unit tests (no database)
+        run: mvn -B -ntp test -Dtest='CursorTest,RequestHasherTest'
+
+      - name: INVARIANT -- unbalanced entries cannot be committed, even via raw SQL
+        run: mvn -B -ntp test -Dtest='InvariantBypassTest'
+
+      - name: CONCURRENCY -- 100 threads x 100 transfers, zero lost updates
+        run: mvn -B -ntp test -Dtest='HotAccountConcurrencyTest,OptimisticConcurrencyTest'
+
+      - name: IDEMPOTENCY -- same key 50x concurrently, exactly one entry
+        run: mvn -B -ntp test -Dtest='IdempotencyRaceTest'
+
+      - name: PROPERTY -- random entry sequences always leave SUM(postings) = 0
+        run: mvn -B -ntp test -Dtest='LedgerInvariantProperties'
+
+      - name: RECONCILIATION -- materialised balances equal recomputed sums
+        run: mvn -B -ntp test -Dtest='ReconciliationTest'
+
+      - name: API contract (status codes, problem+json, cursor pagination)
+        run: mvn -B -ntp test -Dtest='LedgerApiTest'
+
+      - name: package
+        run: mvn -B -ntp package -DskipTests
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+
+  docker:
+    name: docker build + compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build image
+        run: docker compose build
+
+      - name: start the stack
+        run: docker compose up -d
+
+      - name: wait for health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'; then
+              echo "healthy"; exit 0
+            fi
+            sleep 5
+          done
+          docker compose logs --tail=200; exit 1
+
+      - name: SMOKE -- create, replay, conflict, reverse, balance
+        run: ./scripts/smoke.sh
+
+      - name: k6 load test with p99 thresholds
+        uses: grafana/setup-k6-action@v1
+      - run: k6 run k6/load.js
+        env:
+          BASE: http://localhost:8080
+
+      - name: assert the ledger reconciled to zero drift
+        run: |
+          drift=$(curl -fsS http://localhost:8080/actuator/prometheus \
+            | grep '^ledger_reconciliation_drift_total' | awk '{print $2}')
+          echo "drift after load test: $drift"
+          # Any drift at all is a bug, so the threshold is zero, not "small".
+          if [ "${drift%.*}" != "0" ]; then
+            echo "RECONCILIATION DRIFT DETECTED: $drift"; exit 1
+          fi
+
+      - name: dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=400
+
+      - name: tear down
+        if: always()
+        run: docker compose down -v

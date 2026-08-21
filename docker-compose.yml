@@ -1,0 +1,56 @@
+name: ledger
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ledger-postgres
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports: ["5432:5432"]
+    command:
+      - postgres
+      # Deadlock detection default is 1s. Lowered so a lock-ordering mistake
+      # shows up as a fast, visible abort rather than a mysterious stall.
+      - "-c"
+      - "deadlock_timeout=200ms"
+      - "-c"
+      - "max_connections=200"
+      # Statement logging is off by default but one line away when debugging a
+      # lock-ordering problem.
+      - "-c"
+      - "log_lock_waits=on"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ledger:
+    build: .
+    container_name: ledger-service
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/ledger
+      DB_USER: ledger
+      DB_PASSWORD: ledger
+      # optimistic | pessimistic
+      LEDGER_CONCURRENCY: ${LEDGER_CONCURRENCY:-optimistic}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+    ports: ["8080:8080"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ledger-prometheus
+    depends_on: [ledger]
+    ports: ["9090:9090"]
+    volumes:
+      - ./docs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    profiles: ["observability"]
+
+volumes:
+  pgdata:
